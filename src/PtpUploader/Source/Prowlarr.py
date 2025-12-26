@@ -62,6 +62,12 @@ class Prowlarr(SourceBase):
 
     def match_imdb(self, releaseInfo):
         indexer = self.get_indexer(releaseInfo)
+        if indexer is None:
+            logger.warning(
+                "Could not match %s to a configured Prowlarr indexer",
+                releaseInfo.AnnouncementId,
+            )
+            return None
         response = self.session.get(
             f"{self.Url}/api/v1/indexer/{indexer['id']}/newznab",
             params={"t": "movie", "imdbid": "tt" + str(releaseInfo.ImdbId)},
@@ -86,6 +92,10 @@ class Prowlarr(SourceBase):
 
     def DownloadTorrent(self, _, releaseInfo, path):
         match = self.match_imdb(releaseInfo)
+        if match is None:
+            raise PtpUploaderException(
+                "Could not find release info in prowlarr for download"
+            )
         link = None
         for field in match:
             if field.tag == "link":
