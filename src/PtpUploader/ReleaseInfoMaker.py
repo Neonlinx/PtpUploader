@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Optional
 
 import django
-import requests
 
 from pyrosimple.util import metafile
 
@@ -14,7 +13,7 @@ from pyrosimple.util import metafile
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "PtpUploader.web.settings")
 django.setup()
 
-from PtpUploader import MyGlobals, Ptp, release_extractor
+from PtpUploader import Ptp
 from PtpUploader.MyGlobals import MyGlobals
 from PtpUploader.PtpUploaderException import PtpUploaderException
 from PtpUploader.ReleaseDescriptionFormatter import ReleaseDescriptionFormatter
@@ -32,20 +31,29 @@ class ReleaseInfoMaker:
         self.release_info.ReleaseName = self.path.stem
         self.release_info.Logger = MyGlobals.Logger
 
-    def collect_files(self):
+    @property
+    def description_path(self) -> Path:
+        return self.path.parent / f"PTP {self.release_info.ReleaseName}.release description.txt"
+
+    @property
+    def torrent_path(self) -> Path:
+        return self.path.parent / f"PTP {self.release_info.ReleaseName}.torrent"
+
+    def collect_files(self) -> None:
         self.release_info.SetIncludedFileList()
         self.detect_images()
 
-    def detect_images(self):
-        for file in self.release_info.AdditionalFiles():
+    def detect_images(self) -> None:
+        for file in self.release_info.AdditionalFiles() or []:
             if str(file).lower().endswith(".ifo"):
                 self.release_info.Codec = "DVD5"
                 return
-        if self.path.is_dir() and "BDMV" in list([f.name for f in self.path.iterdir()]):
+        if self.path.is_dir() and "BDMV" in {f.name for f in self.path.iterdir()}:
             self.release_info.Codec = "BD25"
 
-    def save_description(self, output_path: os.PathLike, create_screens: bool):
+    def save_description(self, output_path: os.PathLike, create_screens: bool) -> None:
         output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         formatter = ReleaseDescriptionFormatter(
             self.release_info, [], [], self.path.parent, create_screens
         )
@@ -54,57 +62,46 @@ class ReleaseInfoMaker:
         with output_path.open("w") as handle:
             handle.write(description)
 
+    def _ensure_writable(self, path: Path, overwrite: bool, kind: str) -> None:
+        if path.exists() and not overwrite:
+            raise FileExistsError(f"Can't create {kind} because {path!s} already exists!")
+
     def make_release_info(
         self,
         create_torrent=True,
         create_screens=True,
         overwrite=False,
         setDescription: Optional[str] = None,
-    ):
+    ) -> None:
         self.collect_files()
-        description_path = Path(
-            self.path.parent,
-            "PTP " + self.release_info.ReleaseName + ".release description.txt",
-        )
-        if description_path.exists() and not overwrite:
-            raise Exception(
-                "Can't create release description because %r already exists!"
-                % str(description_path)
-            )
-        torrent_path = Path(
-            self.path.parent, "PTP " + self.release_info.ReleaseName + ".torrent"
-        )
-        self.save_description(description_path, create_screens)
+        self._ensure_writable(self.description_path, overwrite, "release description")
+        self.save_description(self.description_path, create_screens)
         if create_torrent:
-            if torrent_path.exists() and not overwrite:
-                raise Exception(
-                    "Can't create torrent because %r already exists!" % str(torrentPath)
-                )
-                return
-            Mktor.Make(MyGlobals.Logger, self.path, torrent_path)
+            self._ensure_writable(self.torrent_path, overwrite, "torrent")
+            Mktor.Make(MyGlobals.Logger, self.path, self.torrent_path)
             base_dir = (
                 self.path.parent if self.release_info.SourceIsAFile() else self.path
             )
             MyGlobals.GetTorrentClient().AddTorrentSkipHashCheck(
-                MyGlobals.Logger, torrent_path, base_dir
+                MyGlobals.Logger, self.torrent_path, base_dir
             )
 
-    def set_description(self, target: str):
-        tID = None
+    def set_description(self, target: str) -> None:
         if os.path.exists(target):
             meta = metafile.Metafile.from_file(Path(target))
             target = meta["comment"]
         if target and "torrentid=" in target:
-            tID = re.search("torrentid=(\d+)", target).group(1)
+            tID = re.search("torrentid=(\d+)", target)
+            if not tID:
+                raise PtpUploaderException("Unable to extract torrent id from target")
+            tID = tID.group(1)
+        else:
+            raise PtpUploaderException("No torrent id present in target")
         Ptp.Login()
         self.release_info.Logger.info("Uploading description as a report to %s", tID)
         if not Settings.AntiCsrfToken:
             raise PtpUploaderException("No AntiCsrfToken found")
-        description_path = Path(
-            self.path.parent,
-            "PTP " + self.release_info.ReleaseName + ".release description.txt",
-        )
-        with open(description_path, "r") as fh:
+        with self.description_path.open("r") as fh:
             r = MyGlobals.session.post(
                 "https://passthepopcorn.me/reportsv2.php?action=takereport",
                 data={
